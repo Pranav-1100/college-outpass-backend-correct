@@ -8,67 +8,57 @@ const authService = {
     // Email/Password Sign In
     async signInWithEmail(email, password) {
       try {
-          // First verify credentials using Firebase Auth REST API
-          const apiKey = process.env.FIREBASE_API_KEY; // Make sure this is set in your .env
-          const signInUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`;
-          
-          // Make the request to Firebase Auth
-          const response = await fetch(signInUrl, {
-              method: 'POST',
-              headers: {
-                  'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                  email,
-                  password,
-                  returnSecureToken: true
-              })
-          });
-
-          const data = await response.json();
-          
-          if (!response.ok) {
-              throw new Error(data.error?.message || 'Invalid credentials');
-          }
-
-          // If we get here, credentials are valid
-          const userRecord = await auth.getUserByEmail(email);
-          const userDoc = await db.collection('users').doc(userRecord.uid).get();
-
-          if (!userDoc.exists) {
-              throw new Error('User data not found');
-          }
-
-          const userData = userDoc.data();
-
-          // Set custom claims if not already set
-          if (!userRecord.customClaims || userRecord.customClaims.role !== userData.role) {
-              await auth.setCustomUserClaims(userRecord.uid, {
-                  role: userData.role,
-                  isAdmin: userData.role === ROLES.ADMIN
-              });
-          }
-
-          // Create custom token
-          const customToken = await auth.createCustomToken(userRecord.uid, {
-              role: userData.role,
-              isAdmin: userData.role === ROLES.ADMIN
-          });
-
-          return {
-              customToken,
-              user: {
-                  uid: userRecord.uid,
-                  email: userRecord.email,
-                  role: userData.role,
-                  name: userData.name
-              }
-          };
-      } catch (error) {
-          console.error('Sign in error:', error);
+        // First get the user by email
+        let userRecord = null;
+        try {
+          userRecord = await auth.getUserByEmail(email);
+        } catch (error) {
+          console.error('Error getting user:', error);
           throw new Error('Invalid credentials');
+        }
+  
+        // Get user's Firestore data
+        const userDoc = await db.collection('users').doc(userRecord.uid).get();
+        
+        if (!userDoc.exists) {
+          throw new Error('User data not found');
+        }
+  
+        const userData = userDoc.data();
+  
+        // For admin users, verify password stored in Firestore
+        if (userData.role === ROLES.ADMIN) {
+          if (userData.password !== password) {
+            throw new Error('Invalid admin credentials');
+          }
+        }
+  
+        // Set custom claims
+        await auth.setCustomUserClaims(userRecord.uid, {
+          role: userData.role,
+          isAdmin: userData.role === ROLES.ADMIN
+        });
+  
+        // Create custom token
+        const customToken = await auth.createCustomToken(userRecord.uid, {
+          role: userData.role,
+          isAdmin: userData.role === ROLES.ADMIN
+        });
+  
+        return {
+          customToken,
+          user: {
+            uid: userRecord.uid,
+            email: userRecord.email,
+            role: userData.role,
+            name: userData.name
+          }
+        };
+      } catch (error) {
+        console.error('Sign in error:', error);
+        throw new Error('Invalid credentials');
       }
-  },
+    },
     
 
   

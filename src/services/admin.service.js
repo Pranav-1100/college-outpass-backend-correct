@@ -15,7 +15,7 @@ const adminService = {
         throw new Error('Admin already exists');
       }
 
-      // Create user in Firebase Auth
+      // Create user in Firebase Auth first
       const userRecord = await auth.createUser({
         email,
         password,
@@ -28,17 +28,22 @@ const adminService = {
         isAdmin: true
       });
 
-      // Create admin document
+      // Create admin document in Firestore
       await db.collection('users').doc(userRecord.uid).set({
         email,
         role: ROLES.ADMIN,
         name: 'System Admin',
         isFirstLogin: false,
+        password: password, // Store password for admin verification
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
 
-      return userRecord;
+      return {
+        uid: userRecord.uid,
+        email: userRecord.email,
+        role: ROLES.ADMIN
+      };
     } catch (error) {
       console.error('Error creating initial admin:', error);
       throw error;
