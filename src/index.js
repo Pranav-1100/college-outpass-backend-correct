@@ -35,27 +35,29 @@ app.use((err, req, res, next) => {
 // Initialize server
 const PORT = process.env.PORT || 3000;
 const initializeServer = async () => {
-    try {
-      // Create initial admin if needed
-      if (process.env.INITIAL_ADMIN_EMAIL && process.env.INITIAL_ADMIN_PASSWORD) {
-        await adminService.createInitialAdmin(
-          process.env.INITIAL_ADMIN_EMAIL,
-          process.env.INITIAL_ADMIN_PASSWORD
-        );
-        console.log('Initial admin created or already exists');
+  try {
+    // Create initial admin if needed
+    if (process.env.INITIAL_ADMIN_EMAIL && process.env.INITIAL_ADMIN_PASSWORD) {
+      const result = await adminService.createInitialAdmin(
+        process.env.INITIAL_ADMIN_EMAIL,
+        process.env.INITIAL_ADMIN_PASSWORD
+      );
+      if (result) {
+        console.log('Initial admin created successfully');
       }
-  
-      // Set up real-time listeners
-      await outpassService.setupRealTimeListeners();
-      console.log('Real-time notification system initialized');
-  
-      app.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
-      });
-    } catch (error) {
-      console.error('Server initialization failed:', error);
-      process.exit(1);
     }
-  };  
+
+    // Set up real-time listeners
+    await outpassService.setupRealTimeListeners();
+    console.log('Real-time notification system initialized');
+
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Server initialization failed:', error);
+    process.exit(1);
+  }
+};  
 
 initializeServer();

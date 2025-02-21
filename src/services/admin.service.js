@@ -10,35 +10,34 @@ const adminService = {
         .where('role', '==', ROLES.ADMIN)
         .limit(1)
         .get();
-
+  
       if (!adminUsers.empty) {
-        throw new Error('Admin already exists');
+        console.log('Admin already exists, skipping initial admin creation');
+        return null; // Return null instead of throwing error
       }
-
-      // Create user in Firebase Auth first
+  
+      // Rest of the function remains the same...
       const userRecord = await auth.createUser({
         email,
         password,
         emailVerified: true
       });
-
-      // Set custom claims
+  
       await auth.setCustomUserClaims(userRecord.uid, {
         role: ROLES.ADMIN,
         isAdmin: true
       });
-
-      // Create admin document in Firestore
+  
       await db.collection('users').doc(userRecord.uid).set({
         email,
         role: ROLES.ADMIN,
         name: 'System Admin',
         isFirstLogin: false,
-        password: password, // Store password for admin verification
+        password: password,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
-
+  
       return {
         uid: userRecord.uid,
         email: userRecord.email,
