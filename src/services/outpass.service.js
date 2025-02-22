@@ -291,6 +291,7 @@ const outpassService = {
 
   // Get approval history for staff
   // Get approval history for staff
+// Get approval history for staff
 async getApprovalHistory(role) {
   try {
     console.log('Getting approval history for role:', role);
@@ -313,7 +314,19 @@ async getApprovalHistory(role) {
           studentDetails: {
             name: data.studentName,
             prn: data.studentPRN,
-            contact: data.studentContact
+            contact: data.studentContact,
+            parentDetails: data.parentDetails || {
+              father: {
+                name: null,
+                email: null,
+                phone: null
+              },
+              mother: {
+                name: null,
+                email: null,
+                phone: null
+              }
+            }
           },
           leaveDetails: {
             type: data.leaveType,
@@ -331,25 +344,27 @@ async getApprovalHistory(role) {
               timestamp: data.approvals[roleKey].timestamp,
               comments: data.approvals[roleKey].comments || ''
             },
-            // Current status in workflow
+            // Current status
             currentStatus: data.currentStatus,
-            currentLevel: getCurrentLevel(data.currentStatus),
             // Full approval chain status
             chain: {
               warden: {
                 status: data.approvals.warden.status,
                 timestamp: data.approvals.warden.timestamp || null,
-                comments: data.approvals.warden.comments || ''
+                comments: data.approvals.warden.comments || '',
+                approverName: data.approvals.warden.approverName || ''
               },
               director: {
                 status: data.approvals.director.status,
                 timestamp: data.approvals.director.timestamp || null,
-                comments: data.approvals.director.comments || ''
+                comments: data.approvals.director.comments || '',
+                approverName: data.approvals.director.approverName || ''
               },
               ao: {
                 status: data.approvals.ao.status,
                 timestamp: data.approvals.ao.timestamp || null,
-                comments: data.approvals.ao.comments || ''
+                comments: data.approvals.ao.comments || '',
+                approverName: data.approvals.ao.approverName || ''
               }
             }
           },
