@@ -61,7 +61,12 @@ const outpassService = {
         outTime: requestData.outTime,
         inTime: requestData.inTime,
         destination: requestData.destination,
-        currentStatus: 'pending_warden',
+        currentStatus: 'pending', // Changed from pending_warden
+        approvalStatus: {
+          warden: false,
+          director: false,
+          ao: false
+        },
         approvals: {
           warden: { status: 'pending' },
           director: { status: 'pending' },
@@ -76,17 +81,27 @@ const outpassService = {
       const outpassRef = await db.collection('outpasses').add(outpassData);
       console.log(`Outpass created with ID: ${outpassRef.id}`);
 
-      // Notify wardens about new request
-      try {
-        await notificationService.notifyRole(
-          ROLES.WARDEN,
-          'New Outpass Request',
-          `New ${leaveType} request from ${studentDoc.data().name}`
-        );
-        console.log('Notification sent to wardens');
+       // Notify all approvers simultaneously
+       try {
+        await Promise.all([
+          notificationService.notifyRole(
+            ROLES.WARDEN,
+            'New Outpass Request',
+            `New ${leaveType} request from ${studentDoc.data().name}`
+          ),
+          notificationService.notifyRole(
+            ROLES.DIRECTOR,
+            'New Outpass Request',
+            `New ${leaveType} request from ${studentDoc.data().name}`
+          ),
+          notificationService.notifyRole(
+            ROLES.AO,
+            'New Outpass Request',
+            `New ${leaveType} request from ${studentDoc.data().name}`
+          )
+        ]);
       } catch (notifyError) {
-        console.error('Error sending notification:', notifyError);
-        // Don't let notification failure prevent outpass creation
+        console.error('Error sending notifications:', notifyError);
       }
 
       return {
@@ -101,7 +116,7 @@ const outpassService = {
 
 
 
-  // Process approval/rejection
+  // Process approval/rejection - Modified for parallel approval
   async processApproval(outpassId, approverData, decision, comments) {
     try {
       const outpassRef = db.collection('outpasses').doc(outpassId);
@@ -114,74 +129,68 @@ const outpassService = {
       const outpassData = outpassDoc.data();
       const approverRole = approverData.role.toLowerCase();
 
-      // Validate approver's turn in workflow
-      const currentApproverIndex = APPROVAL_FLOW.indexOf(approverRole);
-      const currentStatusIndex = APPROVAL_FLOW.indexOf(
-        outpassData.currentStatus.replace('pending_', '')
-      );
-
-      if (currentApproverIndex !== currentStatusIndex) {
-        throw new Error('Not your turn to approve/reject');
-      }
 
       // Update approval status
       const approval = {
         status: decision,
         timestamp: new Date().toISOString(),
         approverId: approverData.uid,
-        approverName: approverData.name || approverData.email || 'Unknown User', // Provide fallbacks
+        approverName: approverData.name || approverData.email || 'Unknown User',
         comments
       };
-      
 
-      // Calculate next status
-      let nextStatus = outpassData.currentStatus;
+      // Update specific role's approval
+      const updates = {
+        [`approvals.${approverRole}`]: approval,
+        [`approvalStatus.${approverRole}`]: decision === 'approved',
+        updatedAt: new Date().toISOString()
+      };
+
+      // If rejected, update overall status
       if (decision === 'rejected') {
-        nextStatus = 'rejected';
-      } else if (decision === 'approved') {
-        const nextApproverIndex = currentApproverIndex + 1;
-        if (nextApproverIndex < APPROVAL_FLOW.length) {
-          nextStatus = `pending_${APPROVAL_FLOW[nextApproverIndex]}`;
-        } else {
-          nextStatus = 'approved';
+        updates.currentStatus = 'rejected';
+      } else {
+        // Check if all have approved
+        const newApprovalStatus = {
+          ...outpassData.approvalStatus,
+          [approverRole]: true
+        };
+        
+        const allApproved = Object.values(newApprovalStatus).every(status => status);
+        
+        if (allApproved) {
+          updates.currentStatus = 'approved';
         }
       }
 
       // Update outpass document
-      await outpassRef.update({
-        [`approvals.${approverRole}`]: approval,
-        currentStatus: nextStatus,
-        updatedAt: new Date().toISOString()
-      });
+      await outpassRef.update(updates);
 
-      // Send notifications
-      const studentDoc = await db.collection('users').doc(outpassData.studentId).get();
-      
-      if (nextStatus === 'approved') {
+      // Send notifications based on new status
+      if (updates.currentStatus === 'approved') {
         await notificationService.notifyUser(
           outpassData.studentId,
           'Outpass Approved',
-          'Your outpass has been fully approved!'
+          'Your outpass has been approved by all approvers!'
         );
-      } else if (nextStatus === 'rejected') {
+      } else if (updates.currentStatus === 'rejected') {
         await notificationService.notifyUser(
           outpassData.studentId,
           'Outpass Rejected',
           `Your outpass was rejected by ${approverRole.toUpperCase()}`
         );
       } else {
-        // Notify next approver
-        const nextRole = nextStatus.replace('pending_', '');
-        await notificationService.notifyRole(
-          nextRole.toUpperCase(),
-          'Outpass Pending Approval',
-          `New outpass approval pending from ${studentDoc.data().name}`
+        // Notify student of individual approval
+        await notificationService.notifyUser(
+          outpassData.studentId,
+          'Outpass Update',
+          `Your outpass has been approved by ${approverRole.toUpperCase()}`
         );
       }
 
       return {
         id: outpassId,
-        status: nextStatus
+        status: updates.currentStatus || 'pending'
       };
     } catch (error) {
       console.error('Error processing approval:', error);
@@ -230,12 +239,14 @@ const outpassService = {
     }
   },
 
-  // Get pending approvals for role
+  // Get pending approvals for role - Modified for parallel approval
   async getPendingApprovals(role) {
     try {
-      const status = `pending_${role.toLowerCase()}`;
+      const roleKey = role.toLowerCase();
       const outpassesSnapshot = await db.collection('outpasses')
-        .where('currentStatus', '==', status)
+        .where(`approvals.${roleKey}.status`, '==', 'pending')
+        .where('currentStatus', '!=', 'rejected')
+        .orderBy('currentStatus')
         .orderBy('createdAt', 'desc')
         .get();
 
