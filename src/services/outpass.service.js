@@ -1,105 +1,171 @@
+// src/services/outpass.service.js
 const { db, auth, admin } = require('../config/firebase.config');
 const { ROLES, APPROVAL_FLOW } = require('../config/roles.config');
 const notificationService = require('./notification.service');
+const { getCompatibleRoles, ROLE_MAPPING } = require('../middlewares/auth.middleware');
 
-// Initialize Firebase Storage
-// const bucket = admin.storage().bucket();
+
+// Define leave types constants
+const LEAVE_TYPES = {
+  SHORT_LEAVE: 'short_leave',
+  LONG_LEAVE: 'long_leave',
+  VACATION: 'vacation',
+  ACADEMIC: 'academic',
+  NON_ACADEMIC: 'non_academic'
+};
+
+// Define approval flows by leave type
+const APPROVAL_FLOWS = {
+  [LEAVE_TYPES.ACADEMIC]: [ROLES.WARDEN, ROLES.OS],
+  [LEAVE_TYPES.NON_ACADEMIC]: [ROLES.WARDEN, ROLES.CAMPUS_ADMIN],
+  [LEAVE_TYPES.LONG_LEAVE]: [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS],
+  [LEAVE_TYPES.SHORT_LEAVE]: [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS],
+  [LEAVE_TYPES.VACATION]: [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS],
+};
 
 const outpassService = {
   // Create new outpass request
   async createRequest(studentId, requestData) {
     try {
-      console.log(`Attempting to create outpass for student ID: ${studentId}`);
+      console.log(`Creating outpass for student ID: ${studentId}`);
       
-      // Get student details
+      // Get student details from user document
       const studentDoc = await db.collection('users').doc(studentId).get();
-      console.log(`Student document exists: ${studentDoc.exists}`);
       
       if (!studentDoc.exists) {
         console.error(`Student with ID ${studentId} not found in Firestore`);
         throw new Error('Student not found');
       }
 
-      // Determine leave type based on duration
+      const userDetails = studentDoc.data();
+      
+      // Use student data if available, else use provided data
+      let studentName = userDetails.name;
+      let studentPRN = requestData.prn; 
+      let studentEmail = userDetails.email;
+      let studentPhone = requestData.studentPhone;
+      let fatherName = requestData.fatherName;
+      let fatherEmail = requestData.fatherEmail;
+      let fatherPhone = requestData.fatherPhone;
+      let motherName = requestData.motherName;
+      let motherEmail = requestData.motherEmail;
+      let motherPhone = requestData.motherPhone;
+      let branch = "Unknown";
+      
+      // Override with linked student data if available
+      if (userDetails.studentData) {
+        const studentData = userDetails.studentData;
+        
+        // Only override if not explicitly provided in request
+        studentPRN = studentPRN || studentData.prn;
+        studentName = studentName || studentData.name;
+        studentEmail = studentEmail || studentData.email;
+        studentPhone = studentPhone || studentData.phone;
+        fatherName = fatherName || studentData.fatherName;
+        fatherEmail = fatherEmail || studentData.fatherEmail;
+        fatherPhone = fatherPhone || studentData.fatherPhone;
+        motherName = motherName || studentData.motherName;
+        motherEmail = motherEmail || studentData.motherEmail;
+        motherPhone = motherPhone || studentData.motherPhone;
+        branch = studentData.branch || branch;
+      }
+
+      // Determine leave type based on duration and request reason
       const fromDate = new Date(requestData.fromDate);
       const toDate = new Date(requestData.toDate);
       const daysDiff = (toDate - fromDate) / (1000 * 60 * 60 * 24);
       
+      // Determine base leave type by duration
       let leaveType;
       if (daysDiff <= 1) {
-        leaveType = 'short_leave';
+        leaveType = LEAVE_TYPES.SHORT_LEAVE;
       } else if (daysDiff > 1 && daysDiff < 7) {
-        leaveType = 'long_leave';
+        leaveType = LEAVE_TYPES.LONG_LEAVE;
       } else {
-        leaveType = 'vacation';
+        leaveType = LEAVE_TYPES.VACATION;
       }
+      
+      // Determine special leave type based on reason if provided
+      if (requestData.leaveCategory) {
+        if (requestData.leaveCategory === 'academic') {
+          leaveType = LEAVE_TYPES.ACADEMIC;
+        } else if (requestData.leaveCategory === 'non_academic') {
+          leaveType = LEAVE_TYPES.NON_ACADEMIC;
+        }
+      }
+      
+      // Get the approval flow for this leave type
+      const approvalFlow = APPROVAL_FLOWS[leaveType] || APPROVAL_FLOWS[LEAVE_TYPES.LONG_LEAVE];
+      
+      // Generate initial approval statuses
+      const approvalStatus = {};
+      const approvals = {};
+      
+      // Initialize all possible approval roles as false/pending
+      [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS].forEach(role => {
+        // If this role is in the approval flow for this leave type, mark as pending
+        // Otherwise, auto-approve (this role is not required for this leave type)
+        const isInFlow = approvalFlow.includes(role);
+        approvalStatus[role.toLowerCase()] = !isInFlow; // Auto-approve if not in flow
+        approvals[role.toLowerCase()] = {
+          status: isInFlow ? 'pending' : 'auto_approved',
+          timestamp: isInFlow ? null : new Date().toISOString(),
+          comments: isInFlow ? '' : 'Auto-approved (not required for this leave type)'
+        };
+      });
 
       const outpassData = {
         studentId,
-        studentName: studentDoc.data().name,
-        studentPRN: requestData.prn,
+        studentName,
+        studentPRN,
+        branch,
         parentDetails: {
           father: {
-            name: requestData.fatherName,
-            email: requestData.fatherEmail,
-            phone: requestData.fatherPhone
+            name: fatherName,
+            email: fatherEmail,
+            phone: fatherPhone
           },
           mother: {
-            name: requestData.motherName,
-            email: requestData.motherEmail,
-            phone: requestData.motherPhone
+            name: motherName,
+            email: motherEmail,
+            phone: motherPhone
           }
         },
         studentContact: {
-          email: requestData.studentEmail,
-          phone: requestData.studentPhone
+          email: studentEmail,
+          phone: studentPhone
         },
         leaveType,
+        leaveCategory: requestData.leaveCategory || 'regular',
         purpose: requestData.purpose,
         fromDate: requestData.fromDate,
         toDate: requestData.toDate,
         outTime: requestData.outTime,
         inTime: requestData.inTime,
         destination: requestData.destination,
-        currentStatus: 'pending', // Changed from pending_warden
-        approvalStatus: {
-          warden: false,
-          director: false,
-          ao: false
-        },
-        approvals: {
-          warden: { status: 'pending' },
-          director: { status: 'pending' },
-          ao: { status: 'pending' }
-        },
+        approvalFlow,
+        currentStatus: 'pending',
+        approvalStatus,
+        approvals,
         isUsed: false,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
-      console.log('Creating outpass document with data:', JSON.stringify(outpassData, null, 2));
       const outpassRef = await db.collection('outpasses').add(outpassData);
       console.log(`Outpass created with ID: ${outpassRef.id}`);
 
-       // Notify all approvers simultaneously
-       try {
-        await Promise.all([
+      // Notify only the relevant approvers based on the approval flow
+      try {
+        const notificationPromises = approvalFlow.map(role => 
           notificationService.notifyRole(
-            ROLES.WARDEN,
-            'New Outpass Request',
-            `New ${leaveType} request from ${studentDoc.data().name}`
-          ),
-          notificationService.notifyRole(
-            ROLES.DIRECTOR,
-            'New Outpass Request',
-            `New ${leaveType} request from ${studentDoc.data().name}`
-          ),
-          notificationService.notifyRole(
-            ROLES.AO,
-            'New Outpass Request',
-            `New ${leaveType} request from ${studentDoc.data().name}`
+            role,
+            `New ${leaveType.replace('_', ' ')} Request`,
+            `New ${leaveType.replace('_', ' ')} request from ${studentName}`
           )
-        ]);
+        );
+        
+        await Promise.all(notificationPromises);
       } catch (notifyError) {
         console.error('Error sending notifications:', notifyError);
       }
@@ -114,22 +180,87 @@ const outpassService = {
     }
   },
 
-
-
-  // Process approval/rejection - Modified for parallel approval
+  // Process approval/rejection - Modified for custom approval flows
   async processApproval(outpassId, approverData, decision, comments) {
     try {
       const outpassRef = db.collection('outpasses').doc(outpassId);
       const outpassDoc = await outpassRef.get();
-
+  
       if (!outpassDoc.exists) {
         throw new Error('Outpass not found');
       }
-
+  
       const outpassData = outpassDoc.data();
-      const approverRole = approverData.role.toLowerCase();
-
-
+      
+      // Map old role names to new role names if needed
+      let approverRole = approverData.role.toLowerCase();
+      const originalRole = approverData.originalRole ? approverData.originalRole.toLowerCase() : null;
+      
+      // Use the role mapping from auth middleware
+      if (ROLE_MAPPING && ROLE_MAPPING[approverRole]) {
+        approverRole = ROLE_MAPPING[approverRole];
+      }
+      
+      // Also check original role for backward compatibility
+      if (originalRole && ROLE_MAPPING && ROLE_MAPPING[originalRole]) {
+        const mappedOriginalRole = ROLE_MAPPING[originalRole];
+        // If the mapped original role is different from approver role, we'll check both
+        if (mappedOriginalRole !== approverRole) {
+          console.log(`Using mapped original role: ${originalRole} -> ${mappedOriginalRole}`);
+        }
+      }
+  
+      // Check if this role is in the approval flow for this leave type
+      // Start by getting the approval flow - handle both old and new formats
+      let approvalFlow = outpassData.approvalFlow;
+      
+      // If no approvalFlow specified, use the default based on leave type
+      if (!approvalFlow) {
+        // Default to standard approval flow if nothing else is specified
+        approvalFlow = APPROVAL_FLOWS?.[outpassData.leaveType] || 
+                       [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS];
+      }
+      
+      console.log(`Approval flow for outpass ${outpassId}:`, approvalFlow);
+      console.log(`Checking if ${approverRole} is in approval flow`);
+      
+      // Convert approval flow roles to lowercase for comparison
+      const lowerCaseApprovalFlow = approvalFlow.map(role => 
+        typeof role === 'string' ? role.toLowerCase() : role
+      );
+      
+      // Create a list of all possible role variations to check (old and new names)
+      const roleVariationsToCheck = [approverRole];
+      
+      // Add backward compatibility checks for old role names
+      if (approverRole === 'campus_admin') roleVariationsToCheck.push('director');
+      if (approverRole === 'os') roleVariationsToCheck.push('ao');
+      
+      // Add forward compatibility checks for new role names
+      if (approverRole === 'director') roleVariationsToCheck.push('campus_admin');
+      if (approverRole === 'ao') roleVariationsToCheck.push('os');
+      
+      // Also add the original role if provided
+      if (originalRole && !roleVariationsToCheck.includes(originalRole)) {
+        roleVariationsToCheck.push(originalRole);
+      }
+      
+      console.log('Checking role variations:', roleVariationsToCheck);
+      
+      // Check if any of our role variations are in the approval flow
+      const isInFlow = roleVariationsToCheck.some(roleVariant => 
+        lowerCaseApprovalFlow.includes(roleVariant) || // Check lowercase role name
+        lowerCaseApprovalFlow.includes(roleVariant.toUpperCase()) // Check uppercase role name
+      );
+      
+      // For admin users, always allow them to bypass flow restrictions
+      const isAdmin = approverRole === ROLES.ADMIN || approverRole === 'admin';
+      
+      if (!isInFlow && !isAdmin) {
+        console.error(`Role ${approverRole} not in approval flow:`, lowerCaseApprovalFlow);
+        throw new Error(`You (${approverRole}) are not authorized to approve/reject this type of leave`);
+      }
+  
       // Update approval status
       const approval = {
         status: decision,
@@ -138,34 +269,96 @@ const outpassService = {
         approverName: approverData.name || approverData.email || 'Unknown User',
         comments
       };
-
+  
+      // Determine which field to update based on the role
+      let roleKey = approverRole;
+      
+      // If the old role fields exist in the document, update those instead
+      // to maintain compatibility with existing data
+      if (approverRole === 'campus_admin' && outpassData.approvals.director) {
+        roleKey = 'director';
+      } else if (approverRole === 'os' && outpassData.approvals.ao) {
+        roleKey = 'ao';
+      }
+  
       // Update specific role's approval
       const updates = {
-        [`approvals.${approverRole}`]: approval,
-        [`approvalStatus.${approverRole}`]: decision === 'approved',
+        [`approvals.${roleKey}`]: approval,
+        [`approvalStatus.${roleKey}`]: decision === 'approved',
         updatedAt: new Date().toISOString()
       };
-
+  
       // If rejected, update overall status
       if (decision === 'rejected') {
         updates.currentStatus = 'rejected';
       } else {
-        // Check if all have approved
+        // Check if all required approvers have approved
         const newApprovalStatus = {
           ...outpassData.approvalStatus,
-          [approverRole]: true
+          [roleKey]: true
         };
         
-        const allApproved = Object.values(newApprovalStatus).every(status => status);
+        // For backward compatibility, also check fields with old role names
+        if (roleKey === 'campus_admin') {
+          newApprovalStatus.director = true;
+        } else if (roleKey === 'director') {
+          newApprovalStatus.campus_admin = true;
+        } else if (roleKey === 'os') {
+          newApprovalStatus.ao = true;
+        } else if (roleKey === 'ao') {
+          newApprovalStatus.os = true;
+        }
+        
+        // Only check approval status for roles in this leave's approval flow
+        // Create a list of fields to check (use both old and new role names)
+        const fieldsToCheck = [];
+        
+        for (const role of approvalFlow) {
+          const roleLower = typeof role === 'string' ? role.toLowerCase() : null;
+          if (roleLower === 'warden') fieldsToCheck.push('warden');
+          else if (roleLower === 'campus_admin' || roleLower === 'director') {
+            fieldsToCheck.push('campus_admin', 'director');
+          }
+          else if (roleLower === 'os' || roleLower === 'ao') {
+            fieldsToCheck.push('os', 'ao');
+          }
+        }
+        
+        // Remove duplicates from fieldsToCheck
+        const uniqueFieldsToCheck = [...new Set(fieldsToCheck)];
+        console.log('Checking approval status for fields:', uniqueFieldsToCheck);
+        
+        // For each role type (warden, campus_admin/director, os/ao), check if any of the fields are approved
+        const roleTypeApproval = {
+          warden: uniqueFieldsToCheck.includes('warden') ? newApprovalStatus.warden : true,
+          campus_admin_or_director: uniqueFieldsToCheck.includes('campus_admin') || uniqueFieldsToCheck.includes('director') 
+            ? (newApprovalStatus.campus_admin || newApprovalStatus.director) : true,
+          os_or_ao: uniqueFieldsToCheck.includes('os') || uniqueFieldsToCheck.includes('ao')
+            ? (newApprovalStatus.os || newApprovalStatus.ao) : true
+        };
+        
+        console.log('Role type approval status:', roleTypeApproval);
+        
+        const allApproved = Object.values(roleTypeApproval).every(status => status === true);
         
         if (allApproved) {
           updates.currentStatus = 'approved';
         }
       }
-
+  
       // Update outpass document
       await outpassRef.update(updates);
-
+  
+      // Format role name for notifications
+      let formattedRoleName;
+      if (roleKey === 'campus_admin' || roleKey === 'director') {
+        formattedRoleName = 'Campus Admin';
+      } else if (roleKey === 'os' || roleKey === 'ao') {
+        formattedRoleName = 'Office Staff';
+      } else {
+        formattedRoleName = roleKey.charAt(0).toUpperCase() + roleKey.slice(1);
+      }
+  
       // Send notifications based on new status
       if (updates.currentStatus === 'approved') {
         await notificationService.notifyUser(
@@ -177,17 +370,17 @@ const outpassService = {
         await notificationService.notifyUser(
           outpassData.studentId,
           'Outpass Rejected',
-          `Your outpass was rejected by ${approverRole.toUpperCase()}`
+          `Your outpass was rejected by ${formattedRoleName}`
         );
       } else {
         // Notify student of individual approval
         await notificationService.notifyUser(
           outpassData.studentId,
           'Outpass Update',
-          `Your outpass has been approved by ${approverRole.toUpperCase()}`
+          `Your outpass has been approved by ${formattedRoleName}`
         );
       }
-
+  
       return {
         id: outpassId,
         status: updates.currentStatus || 'pending'
@@ -196,9 +389,10 @@ const outpassService = {
       console.error('Error processing approval:', error);
       throw error;
     }
-  },
+  }
+  ,
 
-  // Get outpass details
+  // Get outpass details - no changes needed
   async getOutpass(outpassId) {
     try {
       const outpassDoc = await db.collection('outpasses').doc(outpassId).get();
@@ -216,7 +410,7 @@ const outpassService = {
     }
   },
 
-  // Get outpasses by student
+  // Get outpasses by student - no changes needed
   async getStudentOutpasses(studentId) {
     try {
       const outpassesSnapshot = await db.collection('outpasses')
@@ -239,25 +433,52 @@ const outpassService = {
     }
   },
 
-  // Get pending approvals for role - Modified for parallel approval
+  // Get pending approvals for role - Updated for approval flows
   async getPendingApprovals(role) {
     try {
-      const roleKey = role.toLowerCase();
-      const outpassesSnapshot = await db.collection('outpasses')
-        .where(`approvals.${roleKey}.status`, '==', 'pending')
-        .where('currentStatus', '!=', 'rejected')
-        .orderBy('currentStatus')
-        .orderBy('createdAt', 'desc')
-        .get();
-
+      console.log('Getting pending approvals for role:', role);
+      
+      // Map old role names to new role names if needed
+      let roleKey = role.toLowerCase();
+      if (ROLE_MAPPING[roleKey]) {
+        roleKey = ROLE_MAPPING[roleKey];
+      }
+      
+      // Get all compatible roles (both old and new names)
+      const compatibleRoles = getCompatibleRoles(roleKey);
+      
+      console.log('Looking for pending approvals with compatible roles:', compatibleRoles);
+      
+      // Initialize array for all pending outpasses
       const outpasses = [];
-      outpassesSnapshot.forEach(doc => {
-        outpasses.push({
-          id: doc.id,
-          ...doc.data()
+      
+      // Check for each compatible role
+      for (const roleVariant of compatibleRoles) {
+        const fieldPath = `approvals.${roleVariant}.status`;
+        
+        // Query for this specific role variant
+        const snapshot = await db.collection('outpasses')
+          .where(fieldPath, '==', 'pending')
+          .where('currentStatus', '!=', 'rejected')
+          .orderBy('currentStatus')
+          .orderBy('createdAt', 'desc')
+          .get();
+        
+        console.log(`Found ${snapshot.size} pending outpasses for role variant: ${roleVariant}`);
+        
+        // Add results to our collection
+        snapshot.forEach(doc => {
+          // Check if this outpass is already in our results (avoid duplicates)
+          const exists = outpasses.some(existing => existing.id === doc.id);
+          if (!exists) {
+            outpasses.push({
+              id: doc.id,
+              ...doc.data()
+            });
+          }
         });
-      });
-
+      }
+  
       return outpasses;
     } catch (error) {
       console.error('Error getting pending approvals:', error);
@@ -265,139 +486,140 @@ const outpassService = {
     }
   },
 
-//   // Get pending approvals for staff (warden/director/AO)
-//   async getPendingApprovals(role) {
-//     try {
-//       const status = `pending_${role.toLowerCase()}`;
-//       const outpassesSnapshot = await db.collection('outpasses')
-//         .where('currentStatus', '==', status)
-//         .orderBy('createdAt', 'desc')
-//         .get();
-
-//       const outpasses = [];
-//       outpassesSnapshot.forEach(doc => {
-//         outpasses.push({
-//           id: doc.id,
-//           ...doc.data()
-//         });
-//       });
-
-//       return outpasses;
-//     } catch (error) {
-//       console.error('Error getting pending approvals:', error);
-//       throw error;
-//     }
-//   },
-
-  // Get approval history for staff
-  // Get approval history for staff
-// Get approval history for staff
-async getApprovalHistory(role) {
-  try {
-    console.log('Getting approval history for role:', role);
-    const roleKey = role.toLowerCase();
-
-    // Query outpasses where this role has made any decision
-    const outpassesSnapshot = await db.collection('outpasses')
-      .where(`approvals.${roleKey}.status`, 'in', ['approved', 'rejected'])
-      .orderBy('createdAt', 'desc')
-      .get();
-
-    console.log(`Found ${outpassesSnapshot.size} outpasses for ${roleKey}`);
-
-    const outpasses = [];
-    outpassesSnapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.approvals[roleKey] && data.approvals[roleKey].timestamp) {
-        outpasses.push({
-          id: doc.id,
-          studentDetails: {
-            name: data.studentName,
-            prn: data.studentPRN,
-            contact: data.studentContact,
-            parentDetails: data.parentDetails || {
-              father: {
-                name: null,
-                email: null,
-                phone: null
+  // Get approval history for staff - Updated for approval flows
+  async getApprovalHistory(role) {
+    try {
+      console.log('Getting approval history for role:', role);
+      
+      // Map old role names to new role names if needed
+      let roleKey = role.toLowerCase();
+      if (ROLE_MAPPING[roleKey]) {
+        roleKey = ROLE_MAPPING[roleKey];
+      }
+      
+      // Get all compatible roles (both old and new names)
+      const compatibleRoles = getCompatibleRoles(roleKey);
+      
+      console.log('Looking for approval history with compatible roles:', compatibleRoles);
+      
+      // Initialize array for all outpasses
+      const outpasses = [];
+      
+      // Check for each compatible role
+      for (const roleVariant of compatibleRoles) {
+        // Query for approved or rejected outpasses for this role variant
+        const snapshot = await db.collection('outpasses')
+          .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
+          .orderBy('createdAt', 'desc')
+          .get();
+          
+        console.log(`Found ${snapshot.size} outpasses for role variant: ${roleVariant}`);
+        
+        // Process outpasses
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          
+          // Check if this outpass is already in our results
+          const exists = outpasses.some(existing => existing.id === doc.id);
+          
+          // Only include outpasses where this role was involved (not auto-approved)
+          if (!exists && data.approvals[roleVariant] && 
+              data.approvals[roleVariant].timestamp && 
+              data.approvals[roleVariant].status !== 'auto_approved') {
+            
+            outpasses.push({
+              id: doc.id,
+              studentDetails: {
+                name: data.studentName,
+                prn: data.studentPRN,
+                branch: data.branch || 'Unknown',
+                contact: data.studentContact,
+                parentDetails: data.parentDetails || {
+                  father: {
+                    name: null,
+                    email: null,
+                    phone: null
+                  },
+                  mother: {
+                    name: null,
+                    email: null,
+                    phone: null
+                  }
+                }
               },
-              mother: {
-                name: null,
-                email: null,
-                phone: null
-              }
-            }
-          },
-          leaveDetails: {
-            type: data.leaveType,
-            purpose: data.purpose,
-            destination: data.destination,
-            fromDate: data.fromDate,
-            toDate: data.toDate,
-            outTime: data.outTime,
-            inTime: data.inTime
-          },
-          approvalDetails: {
-            // Your role's approval
-            myDecision: {
-              status: data.approvals[roleKey].status,
-              timestamp: data.approvals[roleKey].timestamp,
-              comments: data.approvals[roleKey].comments || ''
-            },
-            // Current status
-            currentStatus: data.currentStatus,
-            // Full approval chain status
-            chain: {
-              warden: {
-                status: data.approvals.warden.status,
-                timestamp: data.approvals.warden.timestamp || null,
-                comments: data.approvals.warden.comments || '',
-                approverName: data.approvals.warden.approverName || ''
+              leaveDetails: {
+                type: data.leaveType,
+                category: data.leaveCategory || 'regular',
+                purpose: data.purpose,
+                destination: data.destination,
+                fromDate: data.fromDate,
+                toDate: data.toDate,
+                outTime: data.outTime,
+                inTime: data.inTime,
+                approvalFlow: data.approvalFlow || ['UNKNOWN']
               },
-              director: {
-                status: data.approvals.director.status,
-                timestamp: data.approvals.director.timestamp || null,
-                comments: data.approvals.director.comments || '',
-                approverName: data.approvals.director.approverName || ''
+              approvalDetails: {
+                // Your role's approval
+                myDecision: {
+                  status: data.approvals[roleVariant].status,
+                  timestamp: data.approvals[roleVariant].timestamp,
+                  comments: data.approvals[roleVariant].comments || ''
+                },
+                // Current status
+                currentStatus: data.currentStatus,
+                // Full approval chain status with compatibility for old field names
+                chain: {
+                  warden: {
+                    status: data.approvals.warden?.status || 'pending',
+                    timestamp: data.approvals.warden?.timestamp || null,
+                    comments: data.approvals.warden?.comments || '',
+                    approverName: data.approvals.warden?.approverName || ''
+                  },
+                  campus_admin: {
+                    status: data.approvals.campus_admin?.status || data.approvals.director?.status || 'pending',
+                    timestamp: data.approvals.campus_admin?.timestamp || data.approvals.director?.timestamp || null,
+                    comments: data.approvals.campus_admin?.comments || data.approvals.director?.comments || '',
+                    approverName: data.approvals.campus_admin?.approverName || data.approvals.director?.approverName || ''
+                  },
+                  os: {
+                    status: data.approvals.os?.status || data.approvals.ao?.status || 'pending',
+                    timestamp: data.approvals.os?.timestamp || data.approvals.ao?.timestamp || null,
+                    comments: data.approvals.os?.comments || data.approvals.ao?.comments || '',
+                    approverName: data.approvals.os?.approverName || data.approvals.ao?.approverName || ''
+                  }
+                }
               },
-              ao: {
-                status: data.approvals.ao.status,
-                timestamp: data.approvals.ao.timestamp || null,
-                comments: data.approvals.ao.comments || '',
-                approverName: data.approvals.ao.approverName || ''
-              }
-            }
-          },
-          dates: {
-            created: data.createdAt,
-            updated: data.updatedAt
-          },
-          isCompleted: data.currentStatus === 'approved' || data.currentStatus === 'rejected',
-          finalStatus: getFinalStatus(data.currentStatus)
+              dates: {
+                created: data.createdAt,
+                updated: data.updatedAt
+              },
+              isCompleted: data.currentStatus === 'approved' || data.currentStatus === 'rejected',
+              finalStatus: getFinalStatus(data.currentStatus)
+            });
+          }
         });
       }
-    });
+  
+      // Sort by your approval timestamp, most recent first
+      outpasses.sort((a, b) => {
+        return new Date(b.approvalDetails.myDecision.timestamp) - 
+               new Date(a.approvalDetails.myDecision.timestamp);
+      });
+  
+      console.log(`Returning ${outpasses.length} processed outpasses`);
+      return outpasses;
+    } catch (error) {
+      console.error('Error in getApprovalHistory:', error);
+      throw new Error(`Failed to get approval history: ${error.message}`);
+    }
+  },
 
-    // Sort by your approval timestamp, most recent first
-    outpasses.sort((a, b) => {
-      return new Date(b.approvalDetails.myDecision.timestamp) - 
-             new Date(a.approvalDetails.myDecision.timestamp);
-    });
-
-    console.log(`Returning ${outpasses.length} processed outpasses`);
-    return outpasses;
-  } catch (error) {
-    console.error('Error in getApprovalHistory:', error);
-    throw new Error(`Failed to get approval history: ${error.message}`);
-  }
-},
-
-  // Add a method to set up real-time listeners
-async setupRealTimeListeners() {
+  // Add a method to set up real-time listeners - minor updates for approval flows
+  async setupRealTimeListeners() {
     try {
       // Listen for new outpass requests
       db.collection('outpasses')
-        .where('currentStatus', '==', 'pending_warden')
+        .where('currentStatus', '==', 'pending')
         .onSnapshot(async (snapshot) => {
           const changes = snapshot.docChanges();
           
@@ -405,14 +627,25 @@ async setupRealTimeListeners() {
             if (change.type === 'added') {
               const outpass = change.doc.data();
               
-              // Notify all wardens
-              await notificationService.notifyRole(
-                ROLES.WARDEN,
-                'New Outpass Request',
-                `New ${outpass.leaveType} request from ${outpass.studentName}`
+              // Get the approval flow for this outpass
+              const approvalFlow = outpass.approvalFlow || 
+                APPROVAL_FLOWS[outpass.leaveType] || 
+                APPROVAL_FLOWS[LEAVE_TYPES.LONG_LEAVE];
+              
+              // Notify only the relevant approvers based on the approval flow
+              const notificationPromises = approvalFlow.map(role => 
+                notificationService.notifyRole(
+                  role,
+                  `New ${outpass.leaveType.replace('_', ' ')} Request`,
+                  `New ${outpass.leaveType.replace('_', ' ')} request from ${outpass.studentName}`
+                )
               );
+              
+              await Promise.all(notificationPromises);
             }
           }
+        }, error => {
+          console.error('Error in outpass listener:', error);
         });
   
       // Listen for status changes
@@ -423,93 +656,127 @@ async setupRealTimeListeners() {
           for (const change of changes) {
             if (change.type === 'modified') {
               const outpassData = change.doc.data();
-              const outpassId = change.doc.id;
               
               // Notify student of status change
               if (outpassData.studentId) {
-                switch (outpassData.currentStatus) {
-                  case 'approved':
-                    await notificationService.notifyUser(
-                      outpassData.studentId,
-                      'Outpass Approved',
-                      'Your outpass request has been fully approved!'
-                    );
-                    break;
-                  case 'rejected':
-                    // Find who rejected it
-                    let rejecter = 'A staff member';
-                    if (outpassData.approvals.warden.status === 'rejected') {
-                      rejecter = 'Warden';
-                    } else if (outpassData.approvals.director.status === 'rejected') {
-                      rejecter = 'Director';
-                    } else if (outpassData.approvals.ao.status === 'rejected') {
-                      rejecter = 'Academic Officer';
+                // Notify for final statuses
+                if (outpassData.currentStatus === 'approved') {
+                  await notificationService.notifyUser(
+                    outpassData.studentId,
+                    'Outpass Approved',
+                    'Your outpass has been approved by all required approvers!'
+                  );
+                } else if (outpassData.currentStatus === 'rejected') {
+                  // Find who rejected it
+                  let rejecter = 'A staff member';
+                  if (outpassData.approvals.warden?.status === 'rejected') {
+                    rejecter = 'Warden';
+                  } else if (outpassData.approvals.campus_admin?.status === 'rejected' || 
+                            outpassData.approvals.director?.status === 'rejected') {
+                    rejecter = 'Campus Admin';
+                  } else if (outpassData.approvals.os?.status === 'rejected' ||
+                            outpassData.approvals.ao?.status === 'rejected') {
+                    rejecter = 'Office Staff';
+                  }
+                  
+                  await notificationService.notifyUser(
+                    outpassData.studentId,
+                    'Outpass Rejected',
+                    `Your outpass request was rejected by ${rejecter}`
+                  );
+                } else {
+                  // For individual approvals, check notification log to avoid duplicates
+                  
+                  if (outpassData.approvals.warden?.status === 'approved') {
+                    // Check if we have already notified for this approval
+                    const notifyRef = db.collection('notificationLog')
+                      .doc(`${change.doc.id}_warden_approval`);
+                    
+                    const notifyDoc = await notifyRef.get();
+                    if (!notifyDoc.exists) {
+                      await notificationService.notifyUser(
+                        outpassData.studentId,
+                        'Outpass Update',
+                        'Warden has approved your outpass.'
+                      );
+                      
+                      // Log that we've sent this notification
+                      await notifyRef.set({
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        type: 'warden_approval',
+                        outpassId: change.doc.id
+                      });
                     }
+                  }
+                  
+                  if (outpassData.approvals.campus_admin?.status === 'approved' || 
+                      outpassData.approvals.director?.status === 'approved') {
                     
-                    await notificationService.notifyUser(
-                      outpassData.studentId,
-                      'Outpass Rejected',
-                      `Your outpass request was rejected by ${rejecter}`
-                    );
-                    break;
-                  case 'pending_director':
-                    await notificationService.notifyUser(
-                      outpassData.studentId,
-                      'Outpass Update',
-                      'Warden has approved your outpass. Now awaiting Director approval.'
-                    );
+                    // Check if we have already notified for this approval
+                    const notifyRef = db.collection('notificationLog')
+                      .doc(`${change.doc.id}_campus_admin_approval`);
                     
-                    // Also notify directors
-                    await notificationService.notifyRole(
-                      ROLES.DIRECTOR,
-                      'Outpass Pending Approval',
-                      `New outpass approval pending from ${outpassData.studentName}`
-                    );
-                    break;
-                  case 'pending_ao':
-                    await notificationService.notifyUser(
-                      outpassData.studentId,
-                      'Outpass Update',
-                      'Director has approved your outpass. Now awaiting Academic Officer approval.'
-                    );
+                    const notifyDoc = await notifyRef.get();
+                    if (!notifyDoc.exists) {
+                      await notificationService.notifyUser(
+                        outpassData.studentId,
+                        'Outpass Update',
+                        'Campus Admin has approved your outpass.'
+                      );
+                      
+                      // Log that we've sent this notification
+                      await notifyRef.set({
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        type: 'campus_admin_approval',
+                        outpassId: change.doc.id
+                      });
+                    }
+                  }
+                  
+                  if (outpassData.approvals.os?.status === 'approved' || 
+                      outpassData.approvals.ao?.status === 'approved') {
                     
-                    // Also notify AOs
-                    await notificationService.notifyRole(
-                      ROLES.AO,
-                      'Outpass Pending Approval',
-                      `New outpass approval pending from ${outpassData.studentName}`
-                    );
-                    break;
+                    // Check if we have already notified for this approval
+                    const notifyRef = db.collection('notificationLog')
+                      .doc(`${change.doc.id}_os_approval`);
+                    
+                    const notifyDoc = await notifyRef.get();
+                    if (!notifyDoc.exists) {
+                      await notificationService.notifyUser(
+                        outpassData.studentId,
+                        'Outpass Update',
+                        'Office Staff has approved your outpass.'
+                      );
+                      
+                      // Log that we've sent this notification
+                      await notifyRef.set({
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        type: 'os_approval',
+                        outpassId: change.doc.id
+                      });
+                    }
+                  }
                 }
               }
             }
           }
+        }, error => {
+          console.error('Error in status change listener:', error);
         });
-  
-      console.log('Real-time notifications initialized successfully');
+        
+      console.log('Real-time notification system initialized');
     } catch (error) {
       console.error('Error setting up real-time listeners:', error);
     }
   }
 };
 
-// Helper functions - add these BEFORE the module.exports
-function getCurrentLevel(status) {
-  switch(status) {
-    case 'pending_warden': return 'Warden';
-    case 'pending_director': return 'Director';
-    case 'pending_ao': return 'Academic Officer';
-    case 'approved': return 'Completed';
-    case 'rejected': return 'Rejected';
-    default: return 'Unknown';
-  }
-}
-
+// Helper functions
 function getFinalStatus(currentStatus) {
   if (currentStatus === 'approved') return 'Approved';
   if (currentStatus === 'rejected') return 'Rejected';
   if (currentStatus.startsWith('pending_')) return 'In Progress';
-  return 'Unknown';
+  return 'Pending';
 }
 
 module.exports = outpassService;

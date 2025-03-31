@@ -17,63 +17,79 @@ const validate = (validations) => {
   };
 };
 
-// Validation rules for outpass request
+// Validation rules for outpass request - with student data fields and leave category
 const outpassValidation = [
-    body('purpose')
-      .trim()
-      .isLength({ min: 5, max: 200 })
-      .withMessage('Purpose must be between 5 and 200 characters'),
-    body('fromDate')
-      .isISO8601()
-      .withMessage('Invalid from date format'),
-    body('toDate')
-      .isISO8601()
-      .withMessage('Invalid to date format')
-      .custom((value, { req }) => {
-        if (new Date(value) <= new Date(req.body.fromDate)) {
-          throw new Error('To date must be after from date');
-        }
-        return true;
-      }),
-    body('destination')
-      .trim()
-      .isLength({ min: 3, max: 100 })
-      .withMessage('Destination must be between 3 and 100 characters'),
-    body('prn')
-      .notEmpty()
-      .withMessage('PRN is required'),
-    body('fatherName')
-      .notEmpty()
-      .withMessage('Father\'s name is required'),
-    body('fatherEmail')
-      .isEmail()
-      .withMessage('Valid father\'s email is required'),
-    body('fatherPhone')
-      .notEmpty()
-      .withMessage('Father\'s phone is required'),
-    body('motherName')
-      .notEmpty()
-      .withMessage('Mother\'s name is required'),
-    body('motherEmail')
-      .isEmail()
-      .withMessage('Valid mother\'s email is required'),
-    body('motherPhone')
-      .notEmpty()
-      .withMessage('Mother\'s phone is required'),
-    body('studentEmail')
-      .isEmail()
-      .withMessage('Valid student email is required'),
-    body('studentPhone')
-      .notEmpty()
-      .withMessage('Student phone is required'),
-    body('outTime')
-      .notEmpty()
-      .withMessage('Out time is required'),
-    body('inTime')
-      .notEmpty()
-      .withMessage('In time is required')
-  ];
+  body('purpose')
+    .trim()
+    .isLength({ min: 5, max: 200 })
+    .withMessage('Purpose must be between 5 and 200 characters'),
+  body('fromDate')
+    .isISO8601()
+    .withMessage('Invalid from date format'),
+  body('toDate')
+    .isISO8601()
+    .withMessage('Invalid to date format')
+    .custom((value, { req }) => {
+      if (new Date(value) <= new Date(req.body.fromDate)) {
+        throw new Error('To date must be after from date');
+      }
+      return true;
+    }),
+  body('destination')
+    .trim()
+    .isLength({ min: 3, max: 100 })
+    .withMessage('Destination must be between 3 and 100 characters'),
+  body('prn')
+    .notEmpty()
+    .withMessage('PRN is required'),
   
+  // New leave category field
+  body('leaveCategory')
+    .optional()
+    .isIn(['academic', 'non_academic', 'regular'])
+    .withMessage('Leave category must be academic, non_academic, or regular'),
+  
+  // These fields are now optional as they can be auto-filled
+  body('fatherName')
+    .optional()
+    .notEmpty()
+    .withMessage('Father\'s name is required'),
+  body('fatherEmail')
+    .optional()
+    .isEmail()
+    .withMessage('Valid father\'s email is required'),
+  body('fatherPhone')
+    .optional()
+    .notEmpty()
+    .withMessage('Father\'s phone is required'),
+  body('motherName')
+    .optional()
+    .notEmpty()
+    .withMessage('Mother\'s name is required'),
+  body('motherEmail')
+    .optional()
+    .isEmail()
+    .withMessage('Valid mother\'s email is required'),
+  body('motherPhone')
+    .optional()
+    .notEmpty()
+    .withMessage('Mother\'s phone is required'),
+  body('studentEmail')
+    .optional()
+    .isEmail()
+    .withMessage('Valid student email is required'),
+  body('studentPhone')
+    .optional()
+    .notEmpty()
+    .withMessage('Student phone is required'),
+  
+  body('outTime')
+    .notEmpty()
+    .withMessage('Out time is required'),
+  body('inTime')
+    .notEmpty()
+    .withMessage('In time is required')
+];
 
 // Validation rules for approval/rejection
 const approvalValidation = [
@@ -87,14 +103,14 @@ const approvalValidation = [
     .withMessage('Comments must not exceed 500 characters')
 ];
 
-// Validation rules for user creation
+// Validation rules for user creation - updated for new roles
 const userValidation = [
   body('email')
     .isEmail()
     .withMessage('Invalid email format')
     .normalizeEmail(),
   body('role')
-    .isIn(['student', 'warden', 'director', 'ao', 'staff', 'admin'])
+    .isIn(['student', 'warden', 'campus_admin', 'os', 'staff', 'admin'])
     .withMessage('Invalid role'),
   body('name')
     .trim()
