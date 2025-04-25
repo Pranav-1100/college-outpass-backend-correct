@@ -3,7 +3,8 @@ const ALLOWED_DOMAINS = [
     'viit.ac.in',  // Add your college domains here
     'vit.edu',
     'gmail.com',
-    'sithyd.siu.edu.in'
+    'sithyd.siu.edu.in',
+    'scmshyd.siu.edu.in'
   ];
   
   module.exports = {
