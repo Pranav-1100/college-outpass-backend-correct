@@ -2,6 +2,7 @@
 const { db, auth, admin } = require('../config/firebase.config');
 const { ROLES, APPROVAL_FLOW } = require('../config/roles.config');
 const notificationService = require('./notification.service');
+const studentService = require('./student.service');
 const { getCompatibleRoles, ROLE_MAPPING } = require('../middlewares/auth.middleware');
 
 
@@ -51,6 +52,13 @@ const outpassService = {
       let motherEmail = requestData.motherEmail;
       let motherPhone = requestData.motherPhone;
       let branch = "Unknown";
+      let gender = "";
+      let school = "";
+      let programme = "";
+      let yearOfStudy = "";
+      
+      // Hostel and warden information
+      let hostel = null;
       
       // Override with linked student data if available
       if (userDetails.studentData) {
@@ -68,6 +76,15 @@ const outpassService = {
         motherEmail = motherEmail || studentData.motherEmail;
         motherPhone = motherPhone || studentData.motherPhone;
         branch = studentData.branch || branch;
+        gender = studentData.gender || gender;
+        school = studentData.school || "";
+        programme = studentData.programme || "";
+        yearOfStudy = studentData.yearOfStudy || "";
+        
+        // Add hostel information if available
+        if (studentData.hostel) {
+          hostel = studentData.hostel;
+        }
       }
 
       // Determine leave type based on duration and request reason
@@ -95,23 +112,37 @@ const outpassService = {
       }
       
       // Get the approval flow for this leave type
-      const approvalFlow = APPROVAL_FLOWS[leaveType] || APPROVAL_FLOWS[LEAVE_TYPES.LONG_LEAVE];
+      let approvalFlow = APPROVAL_FLOWS[leaveType] || APPROVAL_FLOWS[LEAVE_TYPES.LONG_LEAVE];
+      
+      // For SCMS students, auto-approve the OS step
+      const isScmsStudent = studentEmail && studentEmail.includes('@scmshyd.siu.edu.in');
       
       // Generate initial approval statuses
       const approvalStatus = {};
       const approvals = {};
       
-      // Initialize all possible approval roles as false/pending
+      // Initialize all possible approval roles
       [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS].forEach(role => {
         // If this role is in the approval flow for this leave type, mark as pending
         // Otherwise, auto-approve (this role is not required for this leave type)
         const isInFlow = approvalFlow.includes(role);
-        approvalStatus[role.toLowerCase()] = !isInFlow; // Auto-approve if not in flow
-        approvals[role.toLowerCase()] = {
-          status: isInFlow ? 'pending' : 'auto_approved',
-          timestamp: isInFlow ? null : new Date().toISOString(),
-          comments: isInFlow ? '' : 'Auto-approved (not required for this leave type)'
-        };
+        
+        // Auto-approve OS for SCMS students
+        if (role === ROLES.OS && isScmsStudent) {
+          approvalStatus[role.toLowerCase()] = true;
+          approvals[role.toLowerCase()] = {
+            status: 'auto_approved',
+            timestamp: new Date().toISOString(),
+            comments: 'Auto-approved for SCMS students'
+          };
+        } else {
+          approvalStatus[role.toLowerCase()] = !isInFlow; // Auto-approve if not in flow
+          approvals[role.toLowerCase()] = {
+            status: isInFlow ? 'pending' : 'auto_approved',
+            timestamp: isInFlow ? null : new Date().toISOString(),
+            comments: isInFlow ? '' : 'Auto-approved (not required for this leave type)'
+          };
+        }
       });
 
       const outpassData = {
@@ -119,6 +150,13 @@ const outpassService = {
         studentName,
         studentPRN,
         branch,
+        // Add school info
+        school,
+        programme,
+        yearOfStudy,
+        gender,
+        // Add hostel information
+        hostel,
         parentDetails: {
           father: {
             name: fatherName,
@@ -149,7 +187,9 @@ const outpassService = {
         approvals,
         isUsed: false,
         createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        // Add isScmsStudent flag for reference
+        isScmsStudent: isScmsStudent
       };
 
       const outpassRef = await db.collection('outpasses').add(outpassData);
@@ -157,15 +197,85 @@ const outpassService = {
 
       // Notify only the relevant approvers based on the approval flow
       try {
-        const notificationPromises = approvalFlow.map(role => 
-          notificationService.notifyRole(
-            role,
+        // Notify specific warden if hostel information is available
+        if (hostel && hostel.wardenName) {
+          // Try to find warden by name
+          const wardenQuery = await db.collection('users')
+            .where('name', '==', hostel.wardenName)
+            .where('role', '==', ROLES.WARDEN)
+            .limit(1)
+            .get();
+            
+          if (!wardenQuery.empty) {
+            // Notify specific warden
+            const wardenDoc = wardenQuery.docs[0];
+            await notificationService.notifyUser(
+              wardenDoc.id,
+              `New Outpass Request`,
+              `New ${leaveType.replace('_', ' ')} request from ${studentName}`
+            );
+          } else {
+            // Fall back to notifying all wardens if specific one not found
+            await notificationService.notifyRole(
+              ROLES.WARDEN,
+              `New ${leaveType.replace('_', ' ')} Request`,
+              `New ${leaveType.replace('_', ' ')} request from ${studentName}`
+            );
+          }
+        } else {
+          // Notify all wardens if no specific warden
+          await notificationService.notifyRole(
+            ROLES.WARDEN,
             `New ${leaveType.replace('_', ' ')} Request`,
             `New ${leaveType.replace('_', ' ')} request from ${studentName}`
-          )
-        );
+          );
+        }
         
-        await Promise.all(notificationPromises);
+        // Notify campus admin (always)
+        if (approvalFlow.includes(ROLES.CAMPUS_ADMIN)) {
+          await notificationService.notifyRole(
+            ROLES.CAMPUS_ADMIN,
+            `New ${leaveType.replace('_', ' ')} Request`,
+            `New ${leaveType.replace('_', ' ')} request from ${studentName}`
+          );
+        }
+        
+        // Notify OS (if not SCMS and in approval flow)
+        if (approvalFlow.includes(ROLES.OS) && !isScmsStudent) {
+          // Check if we can find an OS specific to this school
+          let osQuery;
+          
+          if (school && school.includes('SYMBIOSIS CENTRE FOR MANAGEMENT STUDIES')) {
+            // SCMS office staff (though we auto-approve, still notify)
+            osQuery = await db.collection('users')
+              .where('email', '==', 'os@scmshyd.siu.edu.in')
+              .limit(1)
+              .get();
+          } else if (school && school.includes('SYMBIOSIS INSTITUTE OF TECHNOLOGY')) {
+            // SITHYD office staff
+            osQuery = await db.collection('users')
+              .where('email', '==', 'ao@sithyd.siu.edu.in')
+              .limit(1)
+              .get();
+          }
+          
+          if (osQuery && !osQuery.empty) {
+            // Notify specific OS
+            const osDoc = osQuery.docs[0];
+            await notificationService.notifyUser(
+              osDoc.id,
+              `New Outpass Request`,
+              `New ${leaveType.replace('_', ' ')} request from ${studentName}`
+            );
+          } else {
+            // Fall back to notifying all OS
+            await notificationService.notifyRole(
+              ROLES.OS,
+              `New ${leaveType.replace('_', ' ')} Request`,
+              `New ${leaveType.replace('_', ' ')} request from ${studentName}`
+            );
+          }
+        }
       } catch (notifyError) {
         console.error('Error sending notifications:', notifyError);
       }
@@ -207,6 +317,37 @@ const outpassService = {
         // If the mapped original role is different from approver role, we'll check both
         if (mappedOriginalRole !== approverRole) {
           console.log(`Using mapped original role: ${originalRole} -> ${mappedOriginalRole}`);
+        }
+      }
+      
+      // For wardens, check if they're allowed to approve this student's outpass
+      if (approverRole === ROLES.WARDEN.toLowerCase()) {
+        // If outpass has hostel info with warden name
+        if (outpassData.hostel && outpassData.hostel.wardenName) {
+          // Check if this warden is the student's assigned warden
+          if (outpassData.hostel.wardenName !== approverData.name) {
+            console.error(`Warden ${approverData.name} is not authorized to approve outpass for student with warden ${outpassData.hostel.wardenName}`);
+            throw new Error('You are not authorized to approve/reject this outpass as you are not the assigned warden for this student');
+          }
+        }
+      }
+      
+      // For OS, check if they're allowed to approve this student's outpass
+      if (approverRole === ROLES.OS.toLowerCase()) {
+        // If there's a school and it's SCMS, it should be auto-approved
+        if (outpassData.isScmsStudent || 
+            (outpassData.school && outpassData.school.includes('SYMBIOSIS CENTRE FOR MANAGEMENT STUDIES'))) {
+          console.error(`This outpass is for a SCMS student and the OS step should be auto-approved`);
+          throw new Error('This outpass is for a SCMS student and the OS step should be auto-approved');
+        }
+        
+        // For SITHYD, only the SITHYD OS should approve
+        if (outpassData.school && outpassData.school.includes('SYMBIOSIS INSTITUTE OF TECHNOLOGY')) {
+          // Check if this OS is from SITHYD
+          if (approverData.email !== 'ao@sithyd.siu.edu.in') {
+            console.error(`OS ${approverData.email} is not authorized to approve SITHYD student outpass`);
+            throw new Error('You are not authorized to approve/reject this outpass as you are not the assigned OS for this school');
+          }
         }
       }
   
@@ -389,8 +530,7 @@ const outpassService = {
       console.error('Error processing approval:', error);
       throw error;
     }
-  }
-  ,
+  },
 
   // Get outpass details - no changes needed
   async getOutpass(outpassId) {
@@ -433,8 +573,8 @@ const outpassService = {
     }
   },
 
-  // Get pending approvals for role - Updated for approval flows
-  async getPendingApprovals(role) {
+  // Get pending approvals for role - Updated for warden/school specific
+  async getPendingApprovals(role, userInfo) {
     try {
       console.log('Getting pending approvals for role:', role);
       
@@ -455,14 +595,56 @@ const outpassService = {
       // Check for each compatible role
       for (const roleVariant of compatibleRoles) {
         const fieldPath = `approvals.${roleVariant}.status`;
+        let snapshot;
         
-        // Query for this specific role variant
-        const snapshot = await db.collection('outpasses')
-          .where(fieldPath, '==', 'pending')
-          .where('currentStatus', '!=', 'rejected')
-          .orderBy('currentStatus')
-          .orderBy('createdAt', 'desc')
-          .get();
+        // Query for this specific role variant, with additional filters for wardens and OS
+        if (roleVariant === 'warden' && userInfo && userInfo.name) {
+          // For wardens, only show outpasses for students in their hostel
+          snapshot = await db.collection('outpasses')
+            .where(fieldPath, '==', 'pending')
+            .where('currentStatus', '!=', 'rejected')
+            .where('hostel.wardenName', '==', userInfo.name)
+            .orderBy('currentStatus')
+            .orderBy('createdAt', 'desc')
+            .get();
+        } else if ((roleVariant === 'os' || roleVariant === 'ao') && userInfo && userInfo.email) {
+          // For OS, filter by school
+          if (userInfo.email === 'ao@sithyd.siu.edu.in') {
+            // SITHYD OS
+            snapshot = await db.collection('outpasses')
+              .where(fieldPath, '==', 'pending')
+              .where('currentStatus', '!=', 'rejected')
+              .where('school', '==', 'Symbiosis Institute of Technology(SIT), Hyderabad')
+              .orderBy('currentStatus')
+              .orderBy('createdAt', 'desc')
+              .get();
+          } else if (userInfo.email === 'os@scmshyd.siu.edu.in') {
+            // SCMS OS - should be auto-approved, but include check anyway
+            snapshot = await db.collection('outpasses')
+              .where(fieldPath, '==', 'pending')
+              .where('currentStatus', '!=', 'rejected')
+              .where('school', '==', 'SYMBIOSIS CENTRE FOR MANAGEMENT STUDIES, HYDERABAD')
+              .orderBy('currentStatus')
+              .orderBy('createdAt', 'desc')
+              .get();
+          } else {
+            // Default query for other OS
+            snapshot = await db.collection('outpasses')
+              .where(fieldPath, '==', 'pending')
+              .where('currentStatus', '!=', 'rejected')
+              .orderBy('currentStatus')
+              .orderBy('createdAt', 'desc')
+              .get();
+          }
+        } else {
+          // Standard query for other roles (campus_admin, etc.)
+          snapshot = await db.collection('outpasses')
+            .where(fieldPath, '==', 'pending')
+            .where('currentStatus', '!=', 'rejected')
+            .orderBy('currentStatus')
+            .orderBy('createdAt', 'desc')
+            .get();
+        }
         
         console.log(`Found ${snapshot.size} pending outpasses for role variant: ${roleVariant}`);
         
@@ -486,8 +668,8 @@ const outpassService = {
     }
   },
 
-  // Get approval history for staff - Updated for approval flows
-  async getApprovalHistory(role) {
+  // Get approval history for staff - Updated for warden/school specific
+  async getApprovalHistory(role, userInfo) {
     try {
       console.log('Getting approval history for role:', role);
       
@@ -507,11 +689,46 @@ const outpassService = {
       
       // Check for each compatible role
       for (const roleVariant of compatibleRoles) {
-        // Query for approved or rejected outpasses for this role variant
-        const snapshot = await db.collection('outpasses')
-          .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
-          .orderBy('createdAt', 'desc')
-          .get();
+        let snapshot;
+        
+        // Add role-specific filtering
+        if (roleVariant === 'warden' && userInfo && userInfo.name) {
+          // For wardens, only show outpasses for students in their hostel
+          snapshot = await db.collection('outpasses')
+            .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
+            .where('hostel.wardenName', '==', userInfo.name)
+            .orderBy(`approvals.${roleVariant}.timestamp`, 'desc')
+            .get();
+        } else if ((roleVariant === 'os' || roleVariant === 'ao') && userInfo && userInfo.email) {
+          // For OS, filter by school
+          if (userInfo.email === 'ao@sithyd.siu.edu.in') {
+            // SITHYD OS
+            snapshot = await db.collection('outpasses')
+              .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
+              .where('school', '==', 'Symbiosis Institute of Technology(SIT), Hyderabad')
+              .orderBy(`approvals.${roleVariant}.timestamp`, 'desc')
+              .get();
+          } else if (userInfo.email === 'os@scmshyd.siu.edu.in') {
+            // SCMS OS
+            snapshot = await db.collection('outpasses')
+              .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
+              .where('school', '==', 'SYMBIOSIS CENTRE FOR MANAGEMENT STUDIES, HYDERABAD')
+              .orderBy(`approvals.${roleVariant}.timestamp`, 'desc')
+              .get();
+          } else {
+            // Default query for other OS
+            snapshot = await db.collection('outpasses')
+              .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
+              .orderBy(`approvals.${roleVariant}.timestamp`, 'desc')
+              .get();
+          }
+        } else {
+          // Standard query for other roles (campus_admin, etc.)
+          snapshot = await db.collection('outpasses')
+            .where(`approvals.${roleVariant}.status`, 'in', ['approved', 'rejected'])
+            .orderBy('createdAt', 'desc')
+            .get();
+        }
           
         console.log(`Found ${snapshot.size} outpasses for role variant: ${roleVariant}`);
         
@@ -533,7 +750,11 @@ const outpassService = {
                 name: data.studentName,
                 prn: data.studentPRN,
                 branch: data.branch || 'Unknown',
+                school: data.school || 'Unknown',
+                gender: data.gender || '',
                 contact: data.studentContact,
+                // Include hostel information
+                hostel: data.hostel || null,
                 parentDetails: data.parentDetails || {
                   father: {
                     name: null,
@@ -611,6 +832,62 @@ const outpassService = {
     } catch (error) {
       console.error('Error in getApprovalHistory:', error);
       throw new Error(`Failed to get approval history: ${error.message}`);
+    }
+  },
+
+  // Get outpasses for a specific warden's hostel
+  async getWardenHostelOutpasses(wardenName, status = null) {
+    try {
+      let query = db.collection('outpasses')
+        .where('hostel.wardenName', '==', wardenName);
+      
+      // Add status filter if provided
+      if (status) {
+        query = query.where('currentStatus', '==', status);
+      }
+      
+      const snapshot = await query.orderBy('createdAt', 'desc').get();
+      
+      const outpasses = [];
+      snapshot.forEach(doc => {
+        outpasses.push({
+          id: doc.id,
+          ...doc.data()
+        });
+      });
+      
+      return outpasses;
+    } catch (error) {
+      console.error('Error getting hostel outpasses:', error);
+      throw error;
+    }
+  },
+  
+  // Get outpasses for a specific school
+  async getSchoolOutpasses(school, status = null) {
+    try {
+      let query = db.collection('outpasses')
+        .where('school', '==', school);
+      
+      // Add status filter if provided
+      if (status) {
+        query = query.where('currentStatus', '==', status);
+      }
+      
+      const snapshot = await query.orderBy('createdAt', 'desc').get();
+      
+      const outpasses = [];
+      snapshot.forEach(doc => {
+        outpasses.push({
+          id: doc.id,
+          ...doc.data()
+        });
+      });
+      
+      return outpasses;
+    } catch (error) {
+      console.error('Error getting school outpasses:', error);
+      throw error;
     }
   },
 
