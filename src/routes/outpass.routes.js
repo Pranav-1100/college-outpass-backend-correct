@@ -85,16 +85,14 @@ router.post('/', verifyAuth, hasRole([ROLES.STUDENT]), async (req, res) => {
 });
 
   // Get pending approvals for staff
-  router.get('/pending', 
-    verifyAuth, 
-    hasRole([ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS]), // The middleware handles role mapping
-    async (req, res) => {
-      try {
-        const outpasses = await outpassService.getPendingApprovals(req.user.role);
-        return sendResponse(res, 200, outpasses);
-      } catch (error) {
-        return sendError(res, 400, error);
-      }
+  router.get('/pending', verifyAuth, hasRole([ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS]), async (req, res) => {
+    try {
+      // Pass the user information to the service
+      const outpasses = await outpassService.getPendingApprovals(req.user.role, req.user);
+      return sendResponse(res, 200, outpasses);
+    } catch (error) {
+      return sendError(res, 400, error);
+    }
   });
   
 
