@@ -56,7 +56,7 @@ function updateByGender() {
               wardenName: "Mr. Chipiri Shiva Prasad",
               wardenContact: "8247721220",
               wardenEmail: "cwingbh.hyd@symbiosis.ac.in"
-            };
+            }; 
             maleCount++;
           }
           
