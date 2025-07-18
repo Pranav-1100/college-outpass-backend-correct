@@ -122,28 +122,38 @@ const outpassService = {
       const approvals = {};
       
       // Initialize all possible approval roles
-      [ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS].forEach(role => {
-        // If this role is in the approval flow for this leave type, mark as pending
-        // Otherwise, auto-approve (this role is not required for this leave type)
-        const isInFlow = approvalFlow.includes(role);
-        
-        // Auto-approve OS for SCMS students
-        if (role === ROLES.OS && isScmsStudent) {
-          approvalStatus[role.toLowerCase()] = true;
-          approvals[role.toLowerCase()] = {
-            status: 'auto_approved',
-            timestamp: new Date().toISOString(),
-            comments: 'Auto-approved for SCMS students'
-          };
-        } else {
-          approvalStatus[role.toLowerCase()] = !isInFlow; // Auto-approve if not in flow
-          approvals[role.toLowerCase()] = {
-            status: isInFlow ? 'pending' : 'auto_approved',
-            timestamp: isInFlow ? null : new Date().toISOString(),
-            comments: isInFlow ? '' : 'Auto-approved (not required for this leave type)'
-          };
-        }
-      });
+      // Initialize all possible approval roles
+[ROLES.WARDEN, ROLES.CAMPUS_ADMIN, ROLES.OS].forEach(role => {
+  // If this role is in the approval flow for this leave type, mark as pending
+  // Otherwise, auto-approve (this role is not required for this leave type)
+  const isInFlow = approvalFlow.includes(role);
+  
+  // Auto-approve OS for SCMS students
+  if (role === ROLES.OS && isScmsStudent) {
+    approvalStatus[role.toLowerCase()] = true;
+    approvals[role.toLowerCase()] = {
+      status: 'auto_approved',
+      timestamp: new Date().toISOString(),
+      comments: 'Auto-approved for SCMS students'
+    };
+  } 
+  // Auto-approve WARDEN for all students (TEMPORARY FIX)
+  else if (role === ROLES.WARDEN) {
+    approvalStatus[role.toLowerCase()] = true;
+    approvals[role.toLowerCase()] = {
+      status: 'auto_approved',
+      timestamp: new Date().toISOString(),
+      comments: 'Auto-approved (temporary warden bypass)'
+    };
+  } else {
+    approvalStatus[role.toLowerCase()] = !isInFlow; // Auto-approve if not in flow
+    approvals[role.toLowerCase()] = {
+      status: isInFlow ? 'pending' : 'auto_approved',
+      timestamp: isInFlow ? null : new Date().toISOString(),
+      comments: isInFlow ? '' : 'Auto-approved (not required for this leave type)'
+    };
+  }
+});
 
       const outpassData = {
         studentId,
